@@ -1,4 +1,21 @@
+#define _GNU_SOURCE  /* for enabling asprintf */
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include "systemcalls.h"
+
+#define PRINT_ERROR(msg)                                                   \
+	do {                                                               \
+		char *estr;                                                \
+		asprintf(&estr, "[%s:%d] %s: %s (%d)",                     \
+			 __FILE__, __LINE__, msg, strerror(errno), errno); \
+		fprintf(stderr, "%s\n", estr);                             \
+		fflush(stderr);                                            \
+		free(estr);                                                \
+	} while (0)
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +33,11 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+	int sysret = system(cmd);
+	if (sysret < 0)
+		return false;
 
-    return true;
+	return true;
 }
 
 /**
@@ -40,6 +60,7 @@ bool do_exec(int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
@@ -47,7 +68,9 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    // command[count] = command[count];
+
+    va_end(args);
 
 /*
  * TODO:
@@ -58,10 +81,32 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+	bool ret = true;
+	int status;
+	pid_t pid;
 
-    va_end(args);
+	pid = fork();
+	switch (pid) {
+	case -1: /* fork() has failed */
+		PRINT_ERROR("fork");
+		ret = false;
+		break;
+	case 0:	 /* child of successful fork() */
+		if (execv(command[0], command) < 0) {
+			PRINT_ERROR("execv");
+			exit(EXIT_FAILURE);
+		}
+	}
 
-    return true;
+	if (ret && (wait(&status) == -1)) {
+		PRINT_ERROR("wait");
+		ret = false;
+	}
+
+	if (ret && WIFEXITED(status))
+		ret = !WEXITSTATUS(status);
+
+	return ret;
 }
 
 /**
@@ -82,8 +127,9 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    //command[count] = command[count];
 
+    va_end(args);
 
 /*
  * TODO
@@ -92,8 +138,44 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+	bool ret = true;
+	int fd, status;
+	pid_t pid;
 
-    va_end(args);
+	fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+	if (fd < 0 ) {
+		PRINT_ERROR("open");
+		return false;
+	}
 
-    return true;
+	pid = fork();
+	switch (pid) {
+	case -1: /* fork() has failed */
+		PRINT_ERROR("fork");
+		ret = false;
+		break;
+	case 0:	 /* child of successful fork() */
+		if (dup2(fd, 1) < 0) {
+			PRINT_ERROR("dup2");
+			close(fd);
+			exit(EXIT_FAILURE);
+		}
+
+		if (execv(command[0], command) < 0) {
+			PRINT_ERROR("execv");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	close(fd);
+
+	if (ret && (wait(&status) == -1)) {
+		PRINT_ERROR("wait");
+		ret = false;
+	}
+
+	if (ret && WIFEXITED(status))
+		ret = !WEXITSTATUS(status);
+
+	return ret;
 }
