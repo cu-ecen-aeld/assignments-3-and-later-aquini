@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 
 FILESDIR=${1}
@@ -21,13 +21,12 @@ if [ -e ${SEARCHSTR} ]; then
     exit 1
 fi
 
-# save the file list produced by find into an array. 
-# https://www.gnu.org/software/bash/manual/html_node/Arrays.html
-FILES=($(find -L ${FILESDIR} -type f))
-
+LIST="$(find -L ${FILESDIR} -type f)"
 LINES=0
-for F in ${FILES[@]}; do
+FILES=0
+for F in ${LIST}; do
     LINES=$((LINES + $(grep "${SEARCHSTR}" $F | wc -l)))
+    FILES=$((FILES + 1))
 done
 
-echo "The number of files are ${#FILES[@]} and the number of matching lines are ${LINES}"
+echo "The number of files are ${FILES} and the number of matching lines are ${LINES}"
