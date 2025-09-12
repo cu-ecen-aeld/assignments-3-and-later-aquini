@@ -20,11 +20,10 @@ static bool signal_exit = false;
 static int port = 9000;
 const char *prog_name;
 const char *file = "/var/tmp/aesdsocketdata";
-const char *short_opts = "hdtp:f:";
+const char *short_opts = "hdp:f:";
 const struct option long_opts[] = {
 	{"help",	0, NULL, 'h'},
 	{"daemon",	0, NULL, 'd'},
-	{"term",	0, NULL, 't'},
 	{"file",	1, NULL, 'f'},
 	{"port",	1, NULL, 'p'},
 	{NULL,		0, NULL,  0}
@@ -36,10 +35,9 @@ char *read_line(int fd);
 
 void print_usage(void)
 {
-	fprintf(stdout, "Usage: %s [-h] | [-p <#>] [-d] [-t] [-f </path/to/file>]\n", prog_name);
+	fprintf(stdout, "Usage: %s [-h] | [-p <#>] [-d] [-f </path/to/file>]\n", prog_name);
 	fprintf(stdout, "    -h|--help                  Display this usage information.\n"
 			"    -d|--daemon                Daemonize the server process.\n"
-			"    -t|--term                  Write syslog messages to terminal.\n"
 			"    -f|--file </path/to/file>  Change the location of data-file on " \
 							"disk (default: %s).\n"
 			"    -p|--port <#>              Change the port from default %d to #\n",
@@ -71,7 +69,6 @@ int main(int argc, char *argv[])
 	struct sockaddr_in socket_addr;
 	struct sigaction sa;
 	int next_opt, socket_fd;
-	int log_options = LOG_PID;
 	bool daemonize = false;
 	FILE *stream;
 
@@ -87,9 +84,6 @@ int main(int argc, char *argv[])
 			case 'd':
 				daemonize = true;
 				break;
-			case 't':
-				log_options |= LOG_PERROR;
-				break;
 			case 'f':
 				file = optarg;
 				break;
@@ -102,21 +96,7 @@ int main(int argc, char *argv[])
 		}
 	} while (next_opt != -1);
 
-	if (daemonize) {
-		log_options = LOG_PID;
-
-		/* ignore SIGHUP in daemon mode */
-		memset(&sa, 0, sizeof (sa));
-		sa.sa_handler = SIG_IGN;
-		if (sigaction(SIGHUP, &sa, NULL) < 0)
-			panic("sigaction()", errno);
-
-		/* see daemon(3) man page for more details */
-		if (daemon(0, 0) < 0)
-			panic("daemon()", errno);
-	}
-
-	openlog(NULL, log_options, LOG_USER);
+	openlog(NULL, LOG_PID|LOG_PERROR, LOG_USER);
 
 	/* open/create the data file */
 	stream = fopen(file, "a+");
@@ -150,9 +130,17 @@ int main(int argc, char *argv[])
 	if (listen(socket_fd, CONN_BACKLOG) < 0)
 		panic("bind()", errno);
 
-	syslog(LOG_INFO, "server listening at %s:%u",
-			inet_ntoa(socket_addr.sin_addr),
-			(unsigned)ntohs(socket_addr.sin_port));
+	if (daemonize) {
+		/* ignore SIGHUP in daemon mode */
+		memset(&sa, 0, sizeof (sa));
+		sa.sa_handler = SIG_IGN;
+		if (sigaction(SIGHUP, &sa, NULL) < 0)
+			panic("sigaction()", errno);
+
+		/* see daemon(3) man page for more details */
+		if (daemon(0, 0) < 0)
+			panic("daemon()", errno);
+	}
 
 	/*
 	 * server is set and running. now we get ready to handle
