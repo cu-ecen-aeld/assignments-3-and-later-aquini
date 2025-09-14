@@ -1,0 +1,19 @@
+#!/bin/sh
+
+AESDDAEMON="/usr/bin/aesdsocket"
+
+case "$1" in
+	start)
+		printf "Starting aesdsocket: "
+		start-stop-daemon --start --name aesdsocket --startas ${AESDDAEMON} -- -d
+		[ $? = 0 ] && echo "OK" || echo "FAIL";
+		;;
+	stop)
+		printf "Stopping aesdsocket: "
+		start-stop-daemon --stop --name aesdsocket --signal TERM
+		[ $? = 0 ] && echo "OK" || echo "FAIL";
+		;;
+	*)
+		echo "USAGE: $0 <start|stop>";
+		exit 1;
+esac
