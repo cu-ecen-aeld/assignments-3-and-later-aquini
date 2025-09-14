@@ -162,6 +162,7 @@ int main(int argc, char *argv[])
 		if (rc < 0)
 			panic("handle_request", errno);
 
+		shutdown(request_fd, SHUT_RDWR);
 		close(request_fd);
 signal_out:
 		if (signal_exit) {
@@ -174,6 +175,7 @@ signal_out:
 	 * a signal was caught, and we broke out of the server loop.
 	 * so we gracefully wrap up and terminate the main program.
 	 */
+	shutdown(socket_fd, SHUT_RDWR);
 	close(socket_fd);
 	fclose(stream);
 	unlink(file);
