@@ -12,11 +12,19 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <time.h>
+
+#include "slist.h"
 
 #define CONN_BACKLOG	512
 #define ARRAY_SIZE(a)	((int)(sizeof (a) / sizeof (__typeof__(a[0]))))
+#define __maybe_unused __attribute__((unused))
 
+pthread_mutex_t log_write_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long sequence = 0;
 static bool signal_exit = false;
+static bool do_work = false;
 static int port = 9000;
 const char *prog_name;
 const char *file = "/var/tmp/aesdsocketdata";
@@ -30,8 +38,18 @@ const struct option long_opts[] = {
 };
 static int term_signals[] = {SIGINT, SIGCHLD, SIGTERM};
 
+struct thread_desc {
+	pthread_t id;
+	bool done;
+	void *data[2];
+	SLIST_ENTRY(thread_desc) list;
+};
+
 int handle_request(int socket_fd, FILE *stream);
 char *read_line(int fd);
+void *monitor_worker(void *arg);
+void *request_worker(void *arg);
+void write_timestamp(FILE *stream);
 
 void print_usage(void)
 {
@@ -43,6 +61,12 @@ void print_usage(void)
 			"    -p|--port <#>              Change the port from default %d to #\n",
 		        file, port);
 	exit(0);
+}
+
+static void sequencer(int signal __maybe_unused)
+{
+	sequence += 1;
+	do_work = true;
 }
 
 static void signal_handler(int signal)
@@ -64,15 +88,27 @@ void panic(const char *msg, int error)
 	exit(-1);
 }
 
+void warn(const char *msg, int error)
+{
+	syslog(LOG_ERR, "ERROR: %s%c %s\n", msg,
+		(error) ? ':' : ' ',
+		(error) ? strerror(error) : " ");
+}
+
 int main(int argc, char *argv[])
 {
 	struct sockaddr_in socket_addr;
 	struct sigaction sa;
-	int next_opt, socket_fd;
+	int rc, next_opt, socket_fd;
+	struct itimerspec last_its, its = {{1, 0}, {1, 0}};
+	timer_t timerid;
 	bool daemonize = false;
 	FILE *stream;
+	struct thread_desc *monitor;
+	SLIST_HEAD(slisthead, thread_desc) threads;
 
 	prog_name = argv[0];
+	SLIST_INIT(&threads);
 
 	do {
 		next_opt = getopt_long(argc, argv, short_opts, long_opts, NULL);
@@ -98,6 +134,18 @@ int main(int argc, char *argv[])
 
 	openlog(NULL, LOG_PID|LOG_PERROR, LOG_USER);
 
+	if (daemonize) {
+		/* ignore SIGHUP in daemon mode */
+		memset(&sa, 0, sizeof (sa));
+		sa.sa_handler = SIG_IGN;
+		if (sigaction(SIGHUP, &sa, NULL) < 0)
+			panic("sigaction()", errno);
+
+		/* see daemon(3) man page for more details */
+		if (daemon(0, 0) < 0)
+			panic("daemon()", errno);
+	}
+
 	/* open/create the data file */
 	stream = fopen(file, "a+");
 	if (!stream)
@@ -110,6 +158,28 @@ int main(int argc, char *argv[])
 		if (sigaction(term_signals[i], &sa, NULL) < 0)
 			panic("sigaction()", errno);
 	}
+
+	/* set up a timer to sequence the monitor thread work */
+	memset(&sa, 0, sizeof (sa));
+	sa.sa_handler = sequencer;
+	if (sigaction(SIGALRM, &sa, NULL) < 0)
+		panic("sigaction()", errno);
+
+	timer_create(CLOCK_REALTIME, NULL, &timerid);
+	timer_settime(timerid, 0, &its, &last_its);
+
+	/* set up a monitor thread, responsible for all required janitorial tasks */
+	monitor = calloc(1, sizeof (*monitor));
+	if (!monitor)
+		panic("calloc()", errno);
+
+	monitor->data[0] = stream;
+	monitor->done = false;
+	rc = pthread_create(&monitor->id, NULL, monitor_worker, monitor);
+	if (rc != 0)
+		panic("pthread_create()", errno);
+
+	SLIST_INSERT_HEAD(&threads, monitor, list);
 
 	/* set up the server socket */
 	socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -130,25 +200,16 @@ int main(int argc, char *argv[])
 	if (listen(socket_fd, CONN_BACKLOG) < 0)
 		panic("bind()", errno);
 
-	if (daemonize) {
-		/* ignore SIGHUP in daemon mode */
-		memset(&sa, 0, sizeof (sa));
-		sa.sa_handler = SIG_IGN;
-		if (sigaction(SIGHUP, &sa, NULL) < 0)
-			panic("sigaction()", errno);
-
-		/* see daemon(3) man page for more details */
-		if (daemon(0, 0) < 0)
-			panic("daemon()", errno);
-	}
-
 	/*
 	 * server is set and running. now we get ready to handle
-	 * incoming requests sequentially (one child at a time),
+	 * incoming requests concurrently (one thread per connection),
 	 * as requested by the implementation instructions.
 	 */
 	for (;;) {
-		int rc, request_fd = accept(socket_fd, NULL, NULL);
+		struct thread_desc *client;
+		int request_fd;
+
+		request_fd = accept(socket_fd, NULL, NULL);
 		if (request_fd < 0) {
 			switch (errno) {
 				case EINTR:
@@ -158,12 +219,23 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		rc = handle_request(request_fd, stream);
-		if (rc < 0)
-			panic("handle_request", errno);
+		client = calloc(1, sizeof (*client));
+		if (!client) {
+			warn("calloc()", errno);
+			continue;
+		}
 
-		shutdown(request_fd, SHUT_RDWR);
-		close(request_fd);
+		rc = pthread_create(&client->id, NULL, request_worker, client);
+		if (rc != 0) {
+			warn("pthread_create()", errno);
+			free(client);
+			continue;
+		}
+
+		client->data[0] = stream;
+		client->data[1] = (void *)(unsigned long)request_fd;
+		client->done = false;
+		SLIST_INSERT_HEAD(&threads, client, list);
 signal_out:
 		if (signal_exit) {
 			syslog(LOG_INFO, "Caught signal, exiting");
@@ -172,9 +244,25 @@ signal_out:
 	}
 
 	/*
-	 * a signal was caught, and we broke out of the server loop.
-	 * so we gracefully wrap up and terminate the main program.
+	 * a signal, or other exception, was caught and we broke out
+	 * of the server loop.
+	 * So, we gracefully wrap up and terminate the main program.
 	 */
+	while (!SLIST_EMPTY(&threads)) {
+		struct thread_desc *t, *tmp;
+
+		SLIST_FOREACH_SAFE(t, &threads, list, tmp) {
+			if (t->done) {
+				rc = pthread_join(t->id, NULL);
+				if (rc != 0)
+					panic("pthread_join()", errno);
+
+				SLIST_REMOVE(&threads, t, thread_desc, list);
+				free(t);
+			}
+		}
+	}
+
 	shutdown(socket_fd, SHUT_RDWR);
 	close(socket_fd);
 	fclose(stream);
@@ -182,6 +270,66 @@ signal_out:
 	closelog();
 
 	return 0;
+}
+
+void write_timestamp(FILE *stream)
+{
+	char str[512];
+	struct tm *tm_info;
+	time_t t;
+
+	time(&t);
+	tm_info = localtime(&t);
+	strftime(str, sizeof (str), "timestamp: %a, %d %b %Y %T %z", tm_info);
+	fprintf(stream, "%s\n", str);
+	fflush(stream);
+}
+
+void *monitor_worker(void *arg)
+{
+	struct thread_desc *desc = arg;
+	FILE *stream = desc->data[0];
+
+	for (;;) {
+		if (signal_exit)
+			break;
+
+		while (!do_work) {
+			sleep(1);
+			fflush(stream);
+		}
+
+		do_work = false;
+
+		/* janitorial work here */
+		if (!(sequence % 10)) {
+			pthread_mutex_lock(&log_write_mutex);
+			write_timestamp(stream);
+			pthread_mutex_unlock(&log_write_mutex);
+		}
+	}
+
+	desc->done = true;
+
+	return NULL;
+}
+
+void *request_worker(void *arg)
+{
+	struct thread_desc *desc = arg;
+	FILE *stream = desc->data[0];
+	int rc, socket_fd = (unsigned long)desc->data[1];
+
+	rc = handle_request(socket_fd, stream);
+	if (rc < 0)
+		warn("handle_request", errno);
+
+	shutdown(socket_fd, SHUT_RDWR);
+	close(socket_fd);
+
+	desc->done = true;
+
+	return NULL;
 }
 
 int handle_request(int socket_fd, FILE *stream)
@@ -203,8 +351,10 @@ int handle_request(int socket_fd, FILE *stream)
 	if ((line = read_line(socket_fd)) == NULL)
 		return EXIT_FAILURE;
 
+	pthread_mutex_lock(&log_write_mutex);
 	fprintf(stream, "%s\n", line);
 	fflush(stream);
+	pthread_mutex_unlock(&log_write_mutex);
 	free(line);
 
 	/* read file and send its whole content back through the socket */
