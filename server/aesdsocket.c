@@ -354,7 +354,6 @@ int handle_request(int socket_fd, FILE *stream)
 	pthread_mutex_lock(&log_write_mutex);
 	fprintf(stream, "%s\n", line);
 	fflush(stream);
-	pthread_mutex_unlock(&log_write_mutex);
 	free(line);
 
 	/* read file and send its whole content back through the socket */
@@ -371,6 +370,7 @@ int handle_request(int socket_fd, FILE *stream)
 				panic("write()", errno);
 		}
 	}
+	pthread_mutex_unlock(&log_write_mutex);
 
 	free(line);
 	syslog(LOG_INFO, "Closed connection from %s",
