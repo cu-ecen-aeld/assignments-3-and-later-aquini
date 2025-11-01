@@ -294,10 +294,8 @@ void *monitor_worker(void *arg)
 		if (signal_exit)
 			break;
 
-		while (!do_work) {
+		while (!do_work)
 			sleep(1);
-			fflush(stream);
-		}
 
 		do_work = false;
 
