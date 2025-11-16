@@ -300,7 +300,6 @@ void write_timestamp(char *file)
 void *monitor_worker(void *arg)
 {
 	struct thread_desc *desc = arg;
-	char *logfile = desc->data[0];
 
 	for (;;) {
 		if (signal_exit)
@@ -314,6 +313,7 @@ void *monitor_worker(void *arg)
 		/* janitorial work here */
 		if (!(sequence % 10)) {
 #ifndef USE_AESD_CHAR_DEVICE
+			char *logfile = desc->data[0];
 			pthread_mutex_lock(&log_write_mutex);
 			write_timestamp(logfile);
 			pthread_mutex_unlock(&log_write_mutex);
