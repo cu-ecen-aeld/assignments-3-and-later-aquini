@@ -46,12 +46,48 @@ int aesd_release(struct inode *inode, struct file *filp)
     return 0;
 }
 
+static loff_t aesd_buffer_size(struct aesd_dev *device)
+{
+	loff_t size = 0;
+	int index;
+
+	for (index = 0; index < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; index++) {
+		struct aesd_buffer_entry *entry = device->queue.entry[index];
+
+		if (entry != NULL)
+			size += entry->size;
+	}
+
+	return size;
+}
+
+static loff_t __aesd_llseek(struct aesd_dev *device, struct file *filp, loff_t off, int whence)
+{
+	return fixed_size_llseek(filp, off, whence, aesd_buffer_size(device));
+}
+
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+	struct aesd_dev *device = filp->private_data;
+	loff_t ret;
+
+	if (!device)
+		return -EBADF;
+
+	mutex_lock(&device->lock);
+	ret = __aesd_llseek(device, filp, off, whence);
+	mutex_unlock(&device->lock);
+
+	return ret;
+}
+
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
 	struct aesd_buffer_entry *entry;
 	struct aesd_dev *device;
-	size_t byte;
 	ssize_t retval = 0;
+	size_t byte = 0;
+	loff_t size = 0;
 
 	PDEBUG("read %zu bytes with offset %lld", count, *f_pos);
 	device = filp->private_data;
@@ -62,21 +98,30 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
 	if (mutex_lock_interruptible(&device->lock))
 		return -ERESTARTSYS;
 
+	size = aesd_buffer_size(device);
+	if (*f_pos > size)
+		goto nothing;
+
 	entry = aesd_circular_buffer_find_entry_offset_for_fpos(&device->queue, *f_pos, &byte);
 	if (!entry)
 		goto nothing;
 
+	if (*f_pos + count > size)
+		count = size - *f_pos;
+
 	if (count > entry->size)
 		count = entry->size;
 
-	if (copy_to_user(buf, entry->buffptr, count)) {
+	if (count + byte > entry->size)
+		count -= byte;
+
+	if (copy_to_user(buf, entry->buffptr+byte, count)) {
 		retval = -EFAULT;
 		goto nothing;
 	}
 
-	mutex_unlock(&device->lock);
-
 	*f_pos += count;
+	mutex_unlock(&device->lock);
 	return count;
 nothing:
 	mutex_unlock (&device->lock);
@@ -165,10 +210,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 		kfree(entry);
 	}
 
-	mutex_unlock(&device->lock);
-
 	*f_pos += count;
-
+	mutex_unlock(&device->lock);
 	return count;
 nomem:
 	mutex_unlock(&device->lock);
@@ -181,6 +224,7 @@ struct file_operations aesd_fops = {
     .write	= aesd_write,
     .open	= aesd_open,
     .release	= aesd_release,
+    .llseek	= aesd_llseek,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)

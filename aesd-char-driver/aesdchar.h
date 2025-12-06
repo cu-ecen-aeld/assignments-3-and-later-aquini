@@ -40,5 +40,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos);
 int aesd_release(struct inode *inode, struct file *filp);
 int aesd_open(struct inode *inode, struct file *filp);
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence);
 
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */
