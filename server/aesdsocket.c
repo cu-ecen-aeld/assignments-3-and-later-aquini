@@ -49,11 +49,11 @@ struct thread_desc {
 	SLIST_ENTRY(thread_desc) list;
 };
 
-int handle_request(int socket_fd, char *file);
+int handle_request(int socket_fd, FILE *stream);
 char *read_line(int fd);
 void *monitor_worker(void *arg);
 void *request_worker(void *arg);
-void write_timestamp(char *file);
+void write_timestamp(FILE *stream);
 
 void print_usage(void)
 {
@@ -154,7 +154,6 @@ int main(int argc, char *argv[])
 	stream = fopen(file, "a+");
 	if (!stream)
 		panic("fopen()", errno);
-	fclose(stream);
 
 	/* set up signal handler actions for catching common termination signals */
 	memset(&sa, 0, sizeof (sa));
@@ -178,7 +177,7 @@ int main(int argc, char *argv[])
 	if (!monitor)
 		panic("calloc()", errno);
 
-	monitor->data[0] = (void *)file;
+	monitor->data[0] = stream;
 	monitor->done = false;
 	rc = pthread_create(&monitor->id, NULL, monitor_worker, monitor);
 	if (rc != 0)
@@ -237,7 +236,7 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
-		client->data[0] = (void *)file;
+		client->data[0] = stream;
 		client->data[1] = (void *)(unsigned long)request_fd;
 		client->done = false;
 		SLIST_INSERT_HEAD(&threads, client, list);
@@ -271,30 +270,25 @@ signal_out:
 	shutdown(socket_fd, SHUT_RDWR);
 	close(socket_fd);
 #ifndef USE_AESD_CHAR_DEVICE
-	unlink(file);
+	fclose(stream);
 #endif
+	unlink(file);
 	closelog();
 
 	return 0;
 }
 
-void write_timestamp(char *file)
+void write_timestamp(FILE *stream)
 {
 	char str[512];
 	struct tm *tm_info;
 	time_t t;
-	FILE *stream;
-
-	stream = fopen(file, "a");
-	if (!stream)
-		return;
 
 	time(&t);
 	tm_info = localtime(&t);
 	strftime(str, sizeof (str), "timestamp: %a, %d %b %Y %T %z", tm_info);
 	fprintf(stream, "%s\n", str);
 	fflush(stream);
-	fclose(stream);
 }
 
 void *monitor_worker(void *arg)
@@ -311,14 +305,14 @@ void *monitor_worker(void *arg)
 		do_work = false;
 
 		/* janitorial work here */
-		if (!(sequence % 10)) {
 #ifndef USE_AESD_CHAR_DEVICE
-			char *logfile = desc->data[0];
+		if (!(sequence % 10)) {
+			FILE *stream = desc->data[0];
 			pthread_mutex_lock(&log_write_mutex);
-			write_timestamp(logfile);
+			write_timestamp(stream);
 			pthread_mutex_unlock(&log_write_mutex);
-#endif
 		}
+#endif
 	}
 
 	desc->done = true;
@@ -329,10 +323,10 @@ void *monitor_worker(void *arg)
 void *request_worker(void *arg)
 {
 	struct thread_desc *desc = arg;
-	char *logfile = desc->data[0];
+	FILE *stream = desc->data[0];
 	int rc, socket_fd = (unsigned long)desc->data[1];
 
-	rc = handle_request(socket_fd, logfile);
+	rc = handle_request(socket_fd, stream);
 	if (rc < 0)
 		warn("handle_request", errno);
 
@@ -344,14 +338,13 @@ void *request_worker(void *arg)
 	return NULL;
 }
 
-int handle_request(int socket_fd, char *file)
+int handle_request(int socket_fd, FILE *stream)
 {
 	struct sockaddr_in peer_addr;
 	socklen_t socket_len = 0;
 	char *line = NULL;
 	size_t len = 0;
 	ssize_t nread;
-	FILE *stream;
 
 	memset(&peer_addr, 0, sizeof (peer_addr));
 	if (getpeername(socket_fd, (struct sockaddr *)&peer_addr, &socket_len) < 0)
@@ -365,21 +358,13 @@ int handle_request(int socket_fd, char *file)
 		return EXIT_FAILURE;
 
 	pthread_mutex_lock(&log_write_mutex);
-	stream = fopen(file, "a");
-	if (!stream)
-		goto skip_log;
-
 	fprintf(stream, "%s\n", line);
 	fflush(stream);
-	fclose(stream);
 	free(line);
-skip_log:
-	stream = fopen(file, "r");
-	if (!stream)
-		goto skip_echo;
 
 	/* read file and send its whole content back through the socket */
 	line = NULL;
+	fseek(stream, 0, SEEK_SET);
 	while ((nread = getline(&line, &len, stream)) != -1) {
 		ssize_t nwrite = 0;
 
@@ -391,12 +376,9 @@ skip_log:
 				panic("write()", errno);
 		}
 	}
-
-	fclose(stream);
-	free(line);
-skip_echo:
 	pthread_mutex_unlock(&log_write_mutex);
 
+	free(line);
 	syslog(LOG_INFO, "Closed connection from %s",
 			inet_ntoa(peer_addr.sin_addr));
 
