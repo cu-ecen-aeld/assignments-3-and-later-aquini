@@ -107,7 +107,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 	struct aesd_buffer_entry *entry;
 	struct aesd_dev *device;
 	char *new_cmd;
-	size_t cmd_len;
 	ssize_t retval = -ENOMEM;
 
 	PDEBUG("write %zu bytes with offset %lld", count, *f_pos);
@@ -136,17 +135,16 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 		goto nomem;
 	}
 
-	cmd_len = strlen(new_cmd);
-	if (new_cmd[cmd_len-1] != '\n') {
-		bool ret = realloc_cmd_entry(&pending_cmd, new_cmd, cmd_len);
+	if (new_cmd[count-1] != '\n') {
+		bool ret = realloc_cmd_entry(&pending_cmd, new_cmd, count);
 
 		kfree(new_cmd);
 		kfree(entry);
 		entry = NULL;
 		if (ret == false)
 		       goto nomem;
-	} else if (new_cmd[cmd_len-1] == '\n' && pending_cmd.size > 0) {
-		bool ret = realloc_cmd_entry(&pending_cmd, new_cmd, cmd_len);
+	} else if (new_cmd[count-1] == '\n' && pending_cmd.size > 0) {
+		bool ret = realloc_cmd_entry(&pending_cmd, new_cmd, count);
 
 		kfree(new_cmd);
 		if (ret == false)
@@ -158,7 +156,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
 		memset(&pending_cmd, 0, sizeof pending_cmd);
 	} else {
 		entry->buffptr = new_cmd;
-		entry->size = cmd_len;
+		entry->size = count;
 		entry = aesd_circular_buffer_add_entry(&device->queue, entry);
 	}
 
@@ -178,11 +176,11 @@ nomem:
 }
 
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
+    .owner	= THIS_MODULE,
+    .read	= aesd_read,
+    .write	= aesd_write,
+    .open	= aesd_open,
+    .release	= aesd_release,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -199,8 +197,6 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
     return err;
 }
 
-
-const char *test = "testing string with newline terminator\n";
 int aesd_init_module(void)
 {
 	dev_t dev = 0;
