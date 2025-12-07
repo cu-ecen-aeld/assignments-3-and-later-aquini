@@ -10,12 +10,14 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
 
 #include "slist.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define CONN_BACKLOG	512
 #define ARRAY_SIZE(a)	((int)(sizeof (a) / sizeof (__typeof__(a[0]))))
@@ -338,33 +340,12 @@ void *request_worker(void *arg)
 	return NULL;
 }
 
-int handle_request(int socket_fd, FILE *stream)
+void echo(int socket_fd, FILE *stream)
 {
-	struct sockaddr_in peer_addr;
-	socklen_t socket_len = 0;
 	char *line = NULL;
 	size_t len = 0;
 	ssize_t nread;
 
-	memset(&peer_addr, 0, sizeof (peer_addr));
-	if (getpeername(socket_fd, (struct sockaddr *)&peer_addr, &socket_len) < 0)
-		return EXIT_FAILURE;
-
-	syslog(LOG_INFO, "Accepted connection from %s",
-			inet_ntoa(peer_addr.sin_addr));
-
-	/* get a line from the socket and write it to file */
-	if ((line = read_line(socket_fd)) == NULL)
-		return EXIT_FAILURE;
-
-	pthread_mutex_lock(&log_write_mutex);
-	fprintf(stream, "%s\n", line);
-	fflush(stream);
-	free(line);
-
-	/* read file and send its whole content back through the socket */
-	line = NULL;
-	fseek(stream, 0, SEEK_SET);
 	while ((nread = getline(&line, &len, stream)) != -1) {
 		ssize_t nwrite = 0;
 
@@ -376,9 +357,65 @@ int handle_request(int socket_fd, FILE *stream)
 				panic("write()", errno);
 		}
 	}
-	pthread_mutex_unlock(&log_write_mutex);
 
 	free(line);
+}
+
+int handle_request(int socket_fd, FILE *stream)
+{
+	struct sockaddr_in peer_addr;
+	socklen_t socket_len = 0;
+	char *line = NULL;
+	struct aesd_seekto seekto __maybe_unused;
+
+	memset(&peer_addr, 0, sizeof (peer_addr));
+	if (getpeername(socket_fd, (struct sockaddr *)&peer_addr, &socket_len) < 0)
+		return EXIT_FAILURE;
+
+	syslog(LOG_INFO, "Accepted connection from %s",
+			inet_ntoa(peer_addr.sin_addr));
+
+	/* get a line from the socket */
+	if ((line = read_line(socket_fd)) == NULL)
+		return EXIT_FAILURE;
+
+	pthread_mutex_lock(&log_write_mutex);
+#ifdef USE_AESD_CHAR_DEVICE
+	/* parse AESDCHAR_IOCSEEKTO:n,n */
+	if (sscanf(line, "AESDCHAR_IOCSEEKTO:%u,%u\n", &seekto.write_cmd,
+	    &seekto.write_cmd_offset) == 2) {
+		int fd, offset;
+
+		fseek(stream, 0, SEEK_SET);
+		syslog(LOG_INFO, "received AESDCHAR_IOCSEEKTO:%u,%u",
+			seekto.write_cmd, seekto.write_cmd_offset);
+
+		if ((fd = fileno(stream)) < 0)
+			panic("fileno()", errno);
+
+		if ((offset = ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto)) < 0)
+			panic("ioctl()", errno);
+
+		free(line);
+		echo(socket_fd, stream);
+		pthread_mutex_unlock(&log_write_mutex);
+		syslog(LOG_INFO, "Closed connection from %s",
+			inet_ntoa(peer_addr.sin_addr));
+
+		return EXIT_SUCCESS;
+	}
+#endif
+
+	/* write line gotten from the socket into the file */
+	fprintf(stream, "%s\n", line);
+	fflush(stream);
+	free(line);
+
+	/* echo the whole file back to the socket */
+	fseek(stream, 0, SEEK_SET);
+	echo(socket_fd, stream);
+	pthread_mutex_unlock(&log_write_mutex);
+
 	syslog(LOG_INFO, "Closed connection from %s",
 			inet_ntoa(peer_addr.sin_addr));
 
