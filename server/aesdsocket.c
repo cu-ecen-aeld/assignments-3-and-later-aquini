@@ -109,7 +109,6 @@ int main(int argc, char *argv[])
 	struct itimerspec last_its, its = {{1, 0}, {1, 0}};
 	timer_t timerid;
 	bool daemonize = false;
-	FILE *stream;
 	struct thread_desc *monitor;
 	SLIST_HEAD(slisthead, thread_desc) threads;
 
@@ -152,11 +151,6 @@ int main(int argc, char *argv[])
 			panic("daemon()", errno);
 	}
 
-	/* open/create the data file */
-	stream = fopen(file, "a+");
-	if (!stream)
-		panic("fopen()", errno);
-
 	/* set up signal handler actions for catching common termination signals */
 	memset(&sa, 0, sizeof (sa));
 	sa.sa_handler = signal_handler;
@@ -179,7 +173,7 @@ int main(int argc, char *argv[])
 	if (!monitor)
 		panic("calloc()", errno);
 
-	monitor->data[0] = stream;
+	monitor->data[0] = (void *)file;
 	monitor->done = false;
 	rc = pthread_create(&monitor->id, NULL, monitor_worker, monitor);
 	if (rc != 0)
@@ -238,7 +232,7 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
-		client->data[0] = stream;
+		client->data[0] = (void *)file;
 		client->data[1] = (void *)(unsigned long)request_fd;
 		client->done = false;
 		SLIST_INSERT_HEAD(&threads, client, list);
@@ -272,9 +266,8 @@ signal_out:
 	shutdown(socket_fd, SHUT_RDWR);
 	close(socket_fd);
 #ifndef USE_AESD_CHAR_DEVICE
-	fclose(stream);
-#endif
 	unlink(file);
+#endif
 	closelog();
 
 	return 0;
@@ -309,10 +302,16 @@ void *monitor_worker(void *arg)
 		/* janitorial work here */
 #ifndef USE_AESD_CHAR_DEVICE
 		if (!(sequence % 10)) {
-			FILE *stream = desc->data[0];
+			char *file = desc->data[0];
+			FILE *stream;
+			/* open/create the data file */
+			stream = fopen(file, "a+");
+			if (!stream)
+				panic("fopen()", errno);
 			pthread_mutex_lock(&log_write_mutex);
 			write_timestamp(stream);
 			pthread_mutex_unlock(&log_write_mutex);
+			fclose(stream);
 		}
 #endif
 	}
@@ -325,8 +324,14 @@ void *monitor_worker(void *arg)
 void *request_worker(void *arg)
 {
 	struct thread_desc *desc = arg;
-	FILE *stream = desc->data[0];
+	char *file = desc->data[0];
 	int rc, socket_fd = (unsigned long)desc->data[1];
+	FILE *stream;
+
+	/* open/create the data file */
+	stream = fopen(file, "a+");
+	if (!stream)
+		panic("fopen()", errno);
 
 	rc = handle_request(socket_fd, stream);
 	if (rc < 0)
@@ -334,6 +339,7 @@ void *request_worker(void *arg)
 
 	shutdown(socket_fd, SHUT_RDWR);
 	close(socket_fd);
+	fclose(stream);
 
 	desc->done = true;
 
